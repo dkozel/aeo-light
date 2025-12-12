@@ -25,7 +25,7 @@
 
 #include <QApplication>
 #include <QByteArray>
-#include <QtCompilerDetection>
+#include <QtGlobal>
 #include <QProcess>
 #include <QDebug>
 #include <QDialogButtonBox>
@@ -2240,7 +2240,7 @@ static int write_frame(AVFormatContext *fmt_ctx, const AVRational *time_base, AV
 
 /* Add an output stream. */
 static void add_stream(OutputStream *ost, AVFormatContext *oc,
-					   AVCodec **codec,
+					   const AVCodec **codec,
 					   enum AVCodecID codec_id)
 {
 	AVCodecContext *c;
@@ -2255,16 +2255,23 @@ static void add_stream(OutputStream *ost, AVFormatContext *oc,
 	}
 
 	// allocid: MainWindowStream01
-	ost->st = avformat_new_stream(oc, *codec);
+	ost->st = avformat_new_stream(oc, NULL);
 	if (!ost->st) {
 		fprintf(stderr, "Could not allocate stream\n");
 		exit(1);
 	}
-	av_log(NULL, AV_LOG_INFO,
-			"ALLOC new: MainWindowStream01 ost->st->codec = %p\n",
-			ost->st->codec);
 	ost->st->id = oc->nb_streams-1;
-	c = ost->st->codec;
+
+	// Allocate codec context
+	ost->enc = avcodec_alloc_context3(*codec);
+	if (!ost->enc) {
+		fprintf(stderr, "Could not allocate codec context\n");
+		exit(1);
+	}
+	av_log(NULL, AV_LOG_INFO,
+			"ALLOC new: MainWindowStream01 ost->enc = %p\n",
+			ost->enc);
+	c = ost->enc;
 
 	switch ((*codec)->type) {
 	case AVMEDIA_TYPE_AUDIO:
@@ -2389,14 +2396,14 @@ static AVFrame *alloc_audio_frame(enum AVSampleFormat sample_fmt,
 	return frame;
 }
 
-static void open_audio(AVFormatContext *oc, AVCodec *codec, OutputStream *ost, AVDictionary *opt_arg)
+static void open_audio(AVFormatContext *oc, const AVCodec *codec, OutputStream *ost, AVDictionary *opt_arg)
 {
 	AVCodecContext *c;
 	int nb_samples;
 	int ret;
 	AVDictionary *opt = NULL;
 
-	c = ost->st->codec;
+	c = ost->enc;
 
 	/* open it */
 	av_dict_copy(&opt, opt_arg, 0);
@@ -2417,7 +2424,7 @@ static void open_audio(AVFormatContext *oc, AVCodec *codec, OutputStream *ost, A
 #define AV_CODEC_CAP_VARIABLE_FRAME_SIZE CODEC_CAP_VARIABLE_FRAME_SIZE
 #endif
 
-	if(c->codec->capabilities & AV_CODEC_CAP_VARIABLE_FRAME_SIZE)
+	if(codec->capabilities & AV_CODEC_CAP_VARIABLE_FRAME_SIZE)
 		nb_samples = 10000;
 	else
 		nb_samples = c->frame_size;
@@ -2470,15 +2477,15 @@ AVFrame *MainWindow::get_audio_frame(OutputStream *ost)
 	avr_one.num = avr_one.den = 1;
 
 	/* check if we want to generate more frames */
-	if (av_compare_ts(ost->next_pts, ost->st->codec->time_base,
+	if (av_compare_ts(ost->next_pts, ost->enc->time_base,
 					  STREAM_DURATION, avr_one) >= 0)
 		return NULL;
 
 	av_log(NULL, AV_LOG_INFO, "Audio generate nb_samples = %d x%d\n",
-			frame->nb_samples, ost->st->codec->channels);
+			frame->nb_samples, ost->enc->channels);
 	for (j = 0; j <frame->nb_samples; j++) {
 		v = (int)(sin(ost->t) * 10000);
-		for (i = 0; i < ost->st->codec->channels; i++)
+		for (i = 0; i < ost->enc->channels; i++)
 			*q++ = v;
 		ost->t     += ost->tincr;
 		ost->tincr += ost->tincr2;
@@ -2506,7 +2513,7 @@ int MainWindow::write_audio_frame(AVFormatContext *oc, OutputStream *ost)
 	int dst_nb_samples;
 
 	av_init_packet(&pkt);
-	c = ost->st->codec;
+	c = ost->enc;
 
 #if 0
 	frame = get_audio_frame(ost);
@@ -2551,8 +2558,16 @@ int MainWindow::write_audio_frame(AVFormatContext *oc, OutputStream *ost)
 		frame->pts = av_rescale_q(ost->samples_count, r, c->time_base);
 		ost->samples_count += dst_nb_samples;
 
-		ret = avcodec_encode_audio2(c, &pkt, frame, &got_packet);
+		ret = avcodec_send_frame(c, frame);
 		if (ret < 0) {
+			fprintf(stderr, "Error sending audio frame to encoder: %s\n", aeo_av_err2str(ret));
+			exit(1);
+		}
+
+		got_packet = 0;
+		ret = avcodec_receive_packet(c, &pkt);
+		if (ret == 0) got_packet = 1;
+		else if (ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) {
 			fprintf(stderr, "Error encoding audio frame: %s\n", aeo_av_err2str(ret));
 			exit(1);
 		}
@@ -2596,10 +2611,10 @@ static AVFrame *alloc_picture(enum AVPixelFormat pix_fmt, int width, int height)
 	return picture;
 }
 
-static void open_video(AVFormatContext *oc, AVCodec *codec, OutputStream *ost, AVDictionary *opt_arg)
+static void open_video(AVFormatContext *oc, const AVCodec *codec, OutputStream *ost, AVDictionary *opt_arg)
 {
 	int ret;
-	AVCodecContext *c = ost->st->codec;
+	AVCodecContext *c = ost->enc;
 	AVDictionary *opt = NULL;
 
 	av_log(NULL, AV_LOG_INFO, "av_dict_copy(&opt, opt_arg, 0)\n");
@@ -2715,11 +2730,11 @@ static void fill_rgba_image(AVFrame *pict, int frame_index,
 
 AVFrame *MainWindow::get_video_frame(OutputStream *ost)
 {
-	AVCodecContext *c = ost->st->codec;
+	AVCodecContext *c = ost->enc;
 
 #if 0
 	/* check if we want to generate more frames */
-	if (av_compare_ts(ost->next_pts, ost->st->codec->time_base,
+	if (av_compare_ts(ost->next_pts, ost->enc->time_base,
 					  STREAM_DURATION, (AVRational){ 1, 1 }) >= 0)
 		return NULL;
 
@@ -2747,7 +2762,7 @@ AVFrame *MainWindow::get_video_frame(OutputStream *ost)
 	}
 	//#elif 0
 	/* check if we want to generate more frames */
-	if (av_compare_ts(ost->next_pts, ost->st->codec->time_base,
+	if (av_compare_ts(ost->next_pts, ost->enc->time_base,
 					  STREAM_DURATION, (AVRational){ 1, 1 }) >= 0)
 		return NULL;
 
@@ -2841,7 +2856,7 @@ int MainWindow::write_video_frame(AVFormatContext *oc, OutputStream *ost)
 	pkt.data = NULL;
 	pkt.size = 0;
 
-	c = ost->st->codec;
+	c = ost->enc;
 
 	av_log(NULL, AV_LOG_INFO, "frame = get_video_frame(ost)\n");
 	frame = get_video_frame(ost);
@@ -2850,9 +2865,17 @@ int MainWindow::write_video_frame(AVFormatContext *oc, OutputStream *ost)
 	av_init_packet(&pkt);
 
 	/* encode the image */
-	av_log(NULL, AV_LOG_INFO, "ret = avcodec_encode_video2(c, &pkt, frame, &got_packet)\n");
-	ret = avcodec_encode_video2(c, &pkt, frame, &got_packet);
+	av_log(NULL, AV_LOG_INFO, "ret = avcodec_send_frame/receive_packet(c, frame)\n");
+	ret = avcodec_send_frame(c, frame);
 	if (ret < 0) {
+		fprintf(stderr, "Error sending video frame to encoder: %s\n", aeo_av_err2str(ret));
+		exit(1);
+	}
+
+	got_packet = 0;
+	ret = avcodec_receive_packet(c, &pkt);
+	if (ret == 0) got_packet = 1;
+	else if (ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) {
 		fprintf(stderr, "Error encoding video frame: %s\n", aeo_av_err2str(ret));
 		exit(1);
 	}
@@ -2876,9 +2899,9 @@ static void close_stream(AVFormatContext *oc, OutputStream *ost)
 {
 	// allocid: MainWindowStream01
 	av_log(NULL, AV_LOG_INFO,
-			"ALLOC del: MainWindowStream01 ost->st->codec = %p\n",
-			ost->st->codec);
-	avcodec_close(ost->st->codec);
+			"ALLOC del: MainWindowStream01 ost->enc = %p\n",
+			ost->enc);
+	avcodec_close(ost->enc);
 
 	// allocid: MainWindowFrame01
 	// allocid: MainWindowFrame03
@@ -2923,10 +2946,10 @@ int MainWindow::MuxMain(const char *fn_arg, long startFrame, long numFrames,
 	memset(&video_st, 0, sizeof(OutputStream));
 	memset(&audio_st, 0, sizeof(OutputStream));
 	const char *filename = NULL;
-	AVOutputFormat *fmt = NULL;
+	const AVOutputFormat *fmt = NULL;
 	AVFormatContext *oc = NULL;
-	AVCodec *audio_codec = NULL;
-	AVCodec *video_codec = NULL;
+	const AVCodec *audio_codec = NULL;
+	const AVCodec *video_codec = NULL;
 	int ret;
 	int have_video = 0, have_audio = 0;
 	int encode_video = 0, encode_audio = 0;
@@ -2941,18 +2964,6 @@ int MainWindow::MuxMain(const char *fn_arg, long startFrame, long numFrames,
 
 	if (argc < 2) {
 		throw AeoException("Invalid call to MuxMain");
-	}
-
-	// Call only once (I think libav can handle additional calls all right,
-	// but just in case it doesn't...)
-	static bool needRegisterAll = true;
-	if(needRegisterAll)
-	{
-		/* Initialize libavcodec, and register all codecs and formats. */
-		av_log(NULL, AV_LOG_INFO, "av_register_all()\n");
-
-		av_register_all();
-		needRegisterAll = false;
 	}
 
 	filename = argv[1];
@@ -3113,8 +3124,8 @@ int MainWindow::MuxMain(const char *fn_arg, long startFrame, long numFrames,
 	while (encode_video || encode_audio) {
 		/* select the stream to encode */
 		if (encode_video &&
-			(!encode_audio || av_compare_ts(video_st.next_pts, video_st.st->codec->time_base,
-											audio_st.next_pts, audio_st.st->codec->time_base) <= 0)) {
+			(!encode_audio || av_compare_ts(video_st.next_pts, video_st.enc->time_base,
+											audio_st.next_pts, audio_st.enc->time_base) <= 0)) {
 			av_log(NULL, AV_LOG_INFO, "encode_video = !write_video_frame(oc, &video_st)\n");
 			encode_video = !write_video_frame(oc, &video_st);
 		} else {
@@ -4091,19 +4102,21 @@ void MainWindow::QueueImportVFB()
 
     QDomDocument xmlBOM;
     // Set data into the QDomDocument for processing
-    QDomDocument::ParseResult parse = xmlBOM.setContent(&xmlFile);
+    QString errorMsg;
+    int errorLine, errorColumn;
+    bool parseSuccess = xmlBOM.setContent(&xmlFile, &errorMsg, &errorLine, &errorColumn);
     xmlFile.close();
 
     // nb: the 6.5 docs say casting to bool returns true if there is an
     // error and false otherwise, but the opposite is the case.
-    if(!bool(parse))
+    if(!parseSuccess)
     {
         QMessageBox msgError;
         msgError.setText(
             QString("Error reading XML file, line %1, column %2<br/>%3")
-                .arg(parse.errorLine)
-                .arg(parse.errorColumn)
-                .arg(parse.errorMessage.toHtmlEscaped()));
+                .arg(errorLine)
+                .arg(errorColumn)
+                .arg(errorMsg.toHtmlEscaped()));
         msgError.setIcon(QMessageBox::Critical);
         msgError.setWindowTitle("Error reading XML file");
         msgError.exec();
@@ -4210,7 +4223,7 @@ void MainWindow::QueueImportVFB()
                         "Do you wish to name the output files "
                         "individually or use a base name plus a count?").
                     arg(clipList.size()).arg(nSlots));
-            clipList.resize(nSlots);
+            while (clipList.size() > nSlots) clipList.removeLast();
         }
 
         msg.setWindowTitle("Multiple clips found");
@@ -4272,7 +4285,7 @@ void MainWindow::QueueImportVFB()
             QMessageBox::Ok);
         if(btn != QMessageBox::Ok) return;
 
-        clipList.resize(1);
+        while (clipList.size() > 1) clipList.removeLast();
     }
 
     QList<ExtractTask> taskList;

@@ -112,6 +112,7 @@ public:
 	int requestedTimeBase;
 
 	AVStream *st;
+	AVCodecContext *enc;
 
 	/* pts of the next frame that will be generated */
 	int64_t next_pts;

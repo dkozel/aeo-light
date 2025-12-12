@@ -85,10 +85,14 @@ public:
 
 private:
 	AVFormatContext *outFmt;
+	char *outputFilename;          // Store filename
 
 	                               // corresponding variable in muxing.c
-	AVCodec *audioCodec;           // audio_codec
-	AVCodec *videoCodec;           // video_codec
+	const AVCodec *audioCodec;     // audio_codec
+	const AVCodec *videoCodec;     // video_codec
+
+	AVCodecContext *audioCtx;      // audio codec context
+	AVCodecContext *videoCtx;      // video codec context
 
 	AVStream *audioStream;         // audio_st->st
 	AVStream *videoStream;         // video_st->st

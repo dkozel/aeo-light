@@ -100,9 +100,13 @@ VideoEncoder::VideoEncoder(const char *filename)
 {
 	int i;
 
+	outputFilename = strdup(filename);
+
 	outFmt = NULL;
 	audioCodec = NULL;
 	videoCodec = NULL;
+	audioCtx = NULL;
+	videoCtx = NULL;
 	audioStream = NULL;
 	videoStream = NULL;
 
@@ -121,15 +125,9 @@ VideoEncoder::VideoEncoder(const char *filename)
 	if(sizeof(filename) >= 1024)
 		THROW("Filename too long for libav's hardcoded length setting");
 
-	av_log(NULL, AV_LOG_INFO, "av_register_all()\n");
-	av_register_all();
-
-	av_log(NULL, AV_LOG_INFO, "avcodec_register_all()\n");
-	avcodec_register_all();
-
 	// *** Create the output context based on the filename ***
 	av_log(NULL, AV_LOG_INFO, "avformat_alloc_output_context2()\n");
-	avformat_alloc_output_context2(&outFmt, NULL, NULL, filename);
+	avformat_alloc_output_context2(&outFmt, NULL, NULL, outputFilename);
 
 	if(!outFmt)
 	{
@@ -137,13 +135,8 @@ VideoEncoder::VideoEncoder(const char *filename)
 		outFmt = avformat_alloc_context();
 		if(!outFmt) THROW("Could not allocate output context");
 
-		// filename max length is hardcoded at 1024 characters, incl. NULL
-		if(sizeof(outFmt->filename) <= strlen(filename))
-			THROW("Filename too long for libav's hardcoded length setting");
-		strcpy(outFmt->filename, filename);
-
 		av_log(NULL, AV_LOG_INFO, "--av_guess_format()\n");
-		outFmt->oformat = av_guess_format(NULL, filename, NULL);
+		outFmt->oformat = av_guess_format(NULL, outputFilename, NULL);
 		// if the filename doesn't yield a suitable guess, use mpeg
 		if(!outFmt->oformat) outFmt->oformat = av_guess_format("mpeg", NULL, NULL);
 		if(!outFmt->oformat) THROW("No suitable output file format found.");
@@ -161,59 +154,62 @@ VideoEncoder::VideoEncoder(const char *filename)
 	videoCodec = avcodec_find_encoder_by_name("prores_ks");
 
 	if (!videoCodec) THROW("video Codec not found");
+	this->videoCtx = avcodec_alloc_context3(videoCodec);
 	av_log(NULL, AV_LOG_INFO, "avformat_new_stream(outFmt, videoCodec)\n");
-	videoStream = avformat_new_stream(outFmt, videoCodec);
+	videoStream = avformat_new_stream(outFmt, NULL);
 	if(!videoStream) THROW("could not create video stream");
 	av_log(NULL, AV_LOG_INFO, "videoStream->id = outFmt->nb_streams - 1\n");
 	videoStream->id = outFmt->nb_streams - 1;
 
-	//videoCtx = avcodec_alloc_context3(videoCodec);
-	//if (!videoCtx) THROW("Could not allocate video codec context");
-	av_log(NULL, AV_LOG_INFO, "videoCtx = videoStream->codec\n");
-	AVCodecContext *videoCtx = videoStream->codec;
+	av_log(NULL, AV_LOG_INFO, "Configuring member videoCtx\n");
 
 	av_log(NULL, AV_LOG_INFO, "videoCtx->bit_rate = 400000\n");
 	av_log(NULL, AV_LOG_INFO, "videoCtx->width = 640\n");
 	av_log(NULL, AV_LOG_INFO, "videoCtx->height = 480\n");
-	videoCtx->bit_rate = 400000;
-	videoCtx->width = 640;
-	videoCtx->height = 480;
+	this->videoCtx->bit_rate = 400000;
+	this->videoCtx->width = 640;
+	this->videoCtx->height = 480;
 
 	av_log(NULL, AV_LOG_INFO, "videoStream->time_base = 1/25\n");
 	videoStream->time_base.num = 1;
 	videoStream->time_base.den = 25;
 
 	av_log(NULL, AV_LOG_INFO, "videoCtx->time_base = videoStream->time_base\n");
-	videoCtx->time_base = videoStream->time_base;
+	this->videoCtx->time_base = videoStream->time_base;
 
-	//videoCtx->pix_fmt = AV_PIX_FMT_YUV420P;
+	//this->videoCtx->pix_fmt = AV_PIX_FMT_YUV420P;
 	av_log(NULL, AV_LOG_INFO, "videoCtx->pix_fmt = AV_PIX_FMT_YUVA444P10LE\n");
-	videoCtx->pix_fmt = AV_PIX_FMT_YUVA444P10LE;
+	this->videoCtx->pix_fmt = AV_PIX_FMT_YUVA444P10LE;
 	if(videoCodec->pix_fmts)
 	{
 		for(i=0; videoCodec->pix_fmts[i]; i++)
 		{
-			if(videoCodec->pix_fmts[i] == videoCtx->pix_fmt)
+			if(videoCodec->pix_fmts[i] == this->videoCtx->pix_fmt)
 				break;
 		}
-		if(videoCodec->pix_fmts[i] != videoCtx->pix_fmt)
+		if(videoCodec->pix_fmts[i] != this->videoCtx->pix_fmt)
 		{
 			av_log(NULL, AV_LOG_INFO,
 					"videoCtx->pix_fmt = videoCodec->pix_fmts[0]\n");
-			videoCtx->pix_fmt = videoCodec->pix_fmts[0];
+			this->videoCtx->pix_fmt = videoCodec->pix_fmts[0];
 		}
 	}
 
 	av_log(NULL, AV_LOG_INFO, "videoCtx->gop_size = 12\n");
-	videoCtx->gop_size = 12; // emit intra frame no more than every 12 frames
+	this->videoCtx->gop_size = 12; // emit intra frame no more than every 12 frames
 
 	// If the container requires global headers, set the encoder to same.
 	if(outFmt->oformat->flags & AVFMT_GLOBALHEADER)
 	{
 		av_log(NULL, AV_LOG_INFO,
                 "videoCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER\n");
-        videoCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        this->videoCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 	}
+
+	// Copy codec parameters to stream
+	if (avcodec_parameters_from_context(videoStream->codecpar, this->videoCtx) < 0)
+		THROW("Failed to copy codec parameters to stream");
+
 	// ******************************
 	// *** CONFIGURE AUDIO STREAM ***
 	// ******************************
@@ -458,16 +454,10 @@ void VideoEncoder::Open()
 {
 	if(!outFmt) return;
 
-	av_log(NULL, AV_LOG_INFO, "videoCtx = videoStream->codec\n");
-	AVCodecContext *videoCtx = videoStream->codec;
-
-#ifdef DO_AUDIO
-	av_log(NULL, AV_LOG_INFO, "AVCodecContext *audioCtx = audioStream->codec\n");
-	AVCodecContext *audioCtx = audioStream->codec;
-#endif
+	av_log(NULL, AV_LOG_INFO, "Using member videoCtx and audioCtx\n");
 
 	av_log(NULL, AV_LOG_INFO, "avcodec_open2(videoCtx, videoCodec, NULL)\n");
-	if(avcodec_open2(videoCtx, videoCodec, NULL) < 0)
+	if(avcodec_open2(this->videoCtx, videoCodec, NULL) < 0)
 		THROW("Could not open video codec");
 
 #ifdef DO_AUDIO
@@ -483,9 +473,9 @@ void VideoEncoder::Open()
 	av_log(NULL, AV_LOG_INFO, "videoFrameOut->format = videoCtx->pix_fmt\n");
 	av_log(NULL, AV_LOG_INFO, "videoFrameOut->width = videoCtx->width\n");
 	av_log(NULL, AV_LOG_INFO, "videoFrameOut->height = videoCtx->height\n");
-	videoFrameOut->format = videoCtx->pix_fmt;
-	videoFrameOut->width = videoCtx->width;
-	videoFrameOut->height = videoCtx->height;
+	videoFrameOut->format = this->videoCtx->pix_fmt;
+	videoFrameOut->width = this->videoCtx->width;
+	videoFrameOut->height = this->videoCtx->height;
 	av_log(NULL, AV_LOG_INFO, "av_frame_get_buffer(videoFrameOut, 32)\n");
 	if(av_frame_get_buffer(videoFrameOut, 32) < 0)
 		THROW("Could not allocate videoFrameOut buffer");
@@ -495,14 +485,14 @@ void VideoEncoder::Open()
 			"SWS_BICUBIC, NULL, NULL, NULL)\n",
 			videoFrameIn->width, videoFrameIn->height,
 			av_get_pix_fmt_name(AVPixelFormat(videoFrameIn->format)),
-			videoCtx->width, videoCtx->height,
+			this->videoCtx->width, this->videoCtx->height,
 			av_get_pix_fmt_name(AVPixelFormat(videoFrameOut->format))
 			);
 	videoRescaleCtx = sws_getContext(
 			videoFrameIn->width, videoFrameIn->height,
 			AVPixelFormat(videoFrameIn->format),
-			videoCtx->width, videoCtx->height,
-			AVPixelFormat(videoCtx->pix_fmt),
+			this->videoCtx->width, this->videoCtx->height,
+			AVPixelFormat(this->videoCtx->pix_fmt),
 			SWS_BICUBIC, NULL, NULL, NULL);
 	if(!videoRescaleCtx)
 		THROW("Couldn't initialize video rescale context");
@@ -542,8 +532,8 @@ void VideoEncoder::Open()
 	if (!(outFmt->flags & AVFMT_NOFILE))
 	{
 		av_log(NULL, AV_LOG_INFO,
-				"avio_open(&outFmt->pb, outFmt->filename, AVIO_FLAG_WRITE)\n");
-		if(avio_open(&outFmt->pb, outFmt->filename, AVIO_FLAG_WRITE) < 0)
+				"avio_open(&outFmt->pb, outputFilename, AVIO_FLAG_WRITE)\n");
+		if(avio_open(&outFmt->pb, outputFilename, AVIO_FLAG_WRITE) < 0)
 			THROW("Could not open output file.");
 	}
 
@@ -562,11 +552,11 @@ void VideoEncoder::Close()
 		THROW("Error writing output file trailer");
 
 #ifdef DO_AUDIO
-	av_log(NULL, AV_LOG_INFO, "avcodec_close(audioStream->codec)\n");
-	avcodec_close(audioStream->codec);
+	av_log(NULL, AV_LOG_INFO, "avcodec_close(audioCtx)\n");
+	avcodec_close(this->audioCtx);
 #endif
-	av_log(NULL, AV_LOG_INFO, "avcodec_close(videoStream->codec)\n");
-	avcodec_close(videoStream->codec);
+	av_log(NULL, AV_LOG_INFO, "avcodec_close(videoCtx)\n");
+	avcodec_close(this->videoCtx);
 
 	if(!(outFmt->flags & AVFMT_NOFILE))
 	{
@@ -616,8 +606,7 @@ void VideoEncoder::WriteVideoFrame(const FrameTexture *frame)
 	//av_frame_make_writable(this->videoFrameIn);
 	//memcpy(this->videoFrameIn->data[0], frame->buf, frame->bufSize);
 
-	av_log(NULL, AV_LOG_INFO, "videoCtx = this->videoStream->codec\n");
-	AVCodecContext *videoCtx = this->videoStream->codec;
+	av_log(NULL, AV_LOG_INFO, "Using member videoCtx\n");
 
 	/* when we pass a frame to the encoder, it may keep a reference to it
 	 * internally;
@@ -659,15 +648,20 @@ void VideoEncoder::WriteVideoFrame(const FrameTexture *frame)
 		av_log(NULL, AV_LOG_INFO,
 				"v_packet_rescale_ts(&pkt, videoCtx->time_base, "
 				"videoStream->time_base)\n");
-		av_packet_rescale_ts(&pkt, videoCtx->time_base,
+		av_packet_rescale_ts(&pkt, this->videoCtx->time_base,
 				this->videoStream->time_base);
 
 		int got_packet;
 		av_log(NULL, AV_LOG_INFO,
-				"avcodec_encode_video2(videoCtx, &pkt, videoFrameOut, &got)\n");
-		ret = avcodec_encode_video2(
-				videoCtx, &pkt, this->videoFrameOut, &got_packet);
-		if(ret < 0)	THROW("failed to encode video frame");
+				"avcodec_send_frame/receive_packet(videoCtx, &pkt, videoFrameOut)\n");
+		ret = avcodec_send_frame(this->videoCtx, this->videoFrameOut);
+		if(ret < 0) THROW("failed to send frame to encoder");
+
+		got_packet = 0;
+		ret = avcodec_receive_packet(this->videoCtx, &pkt);
+		if(ret == 0) got_packet = 1;
+		else if(ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
+			THROW("failed to receive encoded packet");
 
 		if(got_packet)
 		{
